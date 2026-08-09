@@ -1,4 +1,7 @@
+import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
@@ -10,7 +13,7 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 
-# تنظیمات لوگ
+# تنظیمات لوگ برای بررسی خطاها
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -27,6 +30,23 @@ db = {
 }
 
 WAITING_FOR_CHANNEL = 1
+
+# ----------------- DUMMY HTTP SERVER FOR RENDER -----------------
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK - Bot is running")
+
+    def log_message(self, format, *args):
+        # غیرفعال کردن لوگ‌های مداوم پینگ رندر
+        return
+
+def run_health_check_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logging.info(f"Health check server running on port {port}")
+    server.serve_forever()
 
 # ----------------- HELPER FUNCTIONS -----------------
 def get_user_data(user_id: int):
@@ -72,14 +92,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # درخواست تایید هویت در صورت عدم ثبت شماره
     if not user_data["phone"]:
         contact_keyboard = ReplyKeyboardMarkup(
-            [[KeyboardButton("تایید هویت", request_contact=True)]],
+            [[KeyboardButton("تایید هویت 🚀", request_contact=True)]],
             resize_keyboard=True,
             one_time_keyboard=True
         )
         await update.message.reply_text(
-            f"سلام {user.first_name} عزیز! 👋\n\n"
-            "به دلیل مسدودیت کاربران فیک برخی از دریافت کنندگان حساب بازی. شما مجبور به تایید حساب خود می‌باشید.\n"
-            "با دکمه زیر هویت خود را تایید کنید.",
+            f"سلام {user.first_name} عزیز! 🎯👋\n\n"
+            "🔥 **به ربات دریافت اکانت رایگان و تضمینی فری فایر خوش آمدید!**\n"
+            "✨ **دعوت کنید 👥 - امتیاز جمع کنید ⭐️ - جایزه ببرید! 🎁**\n\n"
+            "⚠️ **توجه:** به دلیل مسدودیت کاربران فیک برخی از دریافت‌کنندگان حساب بازی، شما مجبور به تایید حساب خود می‌باشید.\n\n"
+            "👇 **با دکمه زیر هویت خود را تایید کنید:**",
             parse_mode="Markdown",
             reply_markup=contact_keyboard
         )
@@ -243,6 +265,9 @@ async def cancel_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----------------- MAIN FUNCTION -----------------
 def main():
+    # شروع وب‌سرور در یک Thread جداگانه برای پاس کردن Health Check رندر
+    threading.Thread(target=run_health_check_server, daemon=True).start()
+
     app = ApplicationBuilder().token(TOKEN).build()
 
     admin_conv = ConversationHandler(
