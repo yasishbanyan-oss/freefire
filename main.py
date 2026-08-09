@@ -1,7 +1,10 @@
 import os
 import sqlite3
 import logging
+import asyncio
 from datetime import datetime
+
+from aiohttp import web
 
 from telegram import (
     Update,
@@ -11,6 +14,7 @@ from telegram import (
 from telegram.constants import ParseMode
 
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
@@ -24,13 +28,19 @@ from telegram.ext import (
 # CONFIG
 # =========================================================
 
+# توکن جدید رباتت را اینجا قرار بده
 TOKEN = "8986373312:AAHt9YHgEu2M_jtbD_qUHQOJY25xAOHwaTU"
 
-# همان ADMIN_ID فایل قبلی
+# مالک ربات
 ADMIN_ID = 6749949992
 
+# دیتابیس
 DB_FILE = "bot.db"
 
+# پورت Render
+PORT = int(os.getenv("PORT", "10000"))
+
+# وضعیت پنل
 WAITING_FOR_CHANNEL = 1
 
 
@@ -39,11 +49,11 @@ WAITING_FOR_CHANNEL = 1
 # =========================================================
 
 logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
-logger = logging.getLogger("ReferralBot")
+logger = logging.getLogger("FreeFireReferralBot")
 
 
 # =========================================================
@@ -57,6 +67,7 @@ def db_connect():
 
 
 def init_db():
+
     conn = db_connect()
     cursor = conn.cursor()
 
@@ -75,7 +86,7 @@ def init_db():
             invited_by INTEGER,
             referrals INTEGER DEFAULT 0,
             verified INTEGER DEFAULT 0,
-            created_at TEXT,
+            created_at TEXT NOT NULL,
             verified_at TEXT
         )
     """)
@@ -92,10 +103,11 @@ def init_db():
     conn.commit()
     conn.close()
 
-    logger.info("Database initialized.")
+    logger.info("Database initialized")
 
 
 def get_setting(key):
+
     conn = db_connect()
     cursor = conn.cursor()
 
@@ -108,13 +120,11 @@ def get_setting(key):
 
     conn.close()
 
-    if row:
-        return row["value"]
-
-    return None
+    return row["value"] if row else None
 
 
 def set_setting(key, value):
+
     conn = db_connect()
     cursor = conn.cursor()
 
@@ -133,6 +143,7 @@ def set_setting(key, value):
 
 
 def create_user(user):
+
     conn = db_connect()
     cursor = conn.cursor()
 
@@ -182,6 +193,7 @@ def create_user(user):
 
 
 def get_user(user_id):
+
     conn = db_connect()
     cursor = conn.cursor()
 
@@ -198,6 +210,7 @@ def get_user(user_id):
 
 
 def set_verified(user_id):
+
     conn = db_connect()
     cursor = conn.cursor()
 
@@ -223,7 +236,6 @@ def add_referral(user_id, referrer_id):
     conn = db_connect()
     cursor = conn.cursor()
 
-    # بررسی اینکه کاربر وجود دارد
     cursor.execute(
         "SELECT invited_by FROM users WHERE user_id = ?",
         (user_id,)
@@ -235,12 +247,10 @@ def add_referral(user_id, referrer_id):
         conn.close()
         return False
 
-    # قبلاً توسط شخص دیگری دعوت شده
     if user["invited_by"] is not None:
         conn.close()
         return False
 
-    # بررسی وجود رفرر
     cursor.execute(
         "SELECT user_id FROM users WHERE user_id = ?",
         (referrer_id,)
@@ -252,7 +262,6 @@ def add_referral(user_id, referrer_id):
         conn.close()
         return False
 
-    # ثبت رفرر
     cursor.execute("""
         UPDATE users
         SET invited_by = ?
@@ -262,7 +271,6 @@ def add_referral(user_id, referrer_id):
         user_id
     ))
 
-    # افزایش تعداد رفرال
     cursor.execute("""
         UPDATE users
         SET referrals = referrals + 1
@@ -271,7 +279,6 @@ def add_referral(user_id, referrer_id):
         referrer_id,
     ))
 
-    # ثبت رویداد
     cursor.execute("""
         INSERT INTO referral_events (
             user_id,
@@ -295,34 +302,30 @@ def add_referral(user_id, referrer_id):
 # KEYBOARDS
 # =========================================================
 
-def main_keyboard():
-
-    keyboard = [
-        ["👤 حساب کاربری", "🔗 لینک رفرال"],
-        ["🎁 دریافت اکانت"],
-    ]
+def verification_keyboard():
 
     return ReplyKeyboardMarkup(
-        keyboard,
-        resize_keyboard=True
+        [
+            [
+                KeyboardButton(
+                    "🔐 تأیید هویت",
+                    request_contact=True
+                )
+            ]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
     )
 
 
-def contact_keyboard():
-
-    keyboard = [
-        [
-            KeyboardButton(
-                "📱 اشتراک شماره تماس",
-                request_contact=True
-            )
-        ]
-    ]
+def main_keyboard():
 
     return ReplyKeyboardMarkup(
-        keyboard,
-        resize_keyboard=True,
-        one_time_keyboard=True
+        [
+            ["👤 حساب من", "🔗 لینک دعوت"],
+            ["🎁 دریافت جایزه"],
+        ],
+        resize_keyboard=True
     )
 
 
@@ -335,16 +338,16 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user = update.effective_user
-
-    if not user:
+    if not update.effective_user:
         return
+
+    user = update.effective_user
 
     create_user(user)
 
-    # -----------------------------------------------------
+    # =====================================================
     # REFERRAL
-    # -----------------------------------------------------
+    # =====================================================
 
     if context.args:
 
@@ -370,10 +373,12 @@ async def start(
                         await context.bot.send_message(
                             chat_id=referrer_id,
                             text=(
-                                "🎉 <b>یک زیرمجموعه جدید!</b>\n\n"
-                                "یک کاربر با لینک شما وارد ربات شد.\n\n"
-                                f"👥 تعداد زیرمجموعه‌ها: "
-                                f"<b>{referrer['referrals']}</b>"
+                                "🎉 <b>دعوت جدید!</b>\n\n"
+                                "یک نفر با لینک دعوت شما وارد شد.\n\n"
+                                f"👥 تعداد دعوت‌های شما: "
+                                f"<b>{referrer['referrals']}</b>\n"
+                                f"⭐ امتیاز شما: "
+                                f"<b>{referrer['referrals'] * 10}</b>"
                             ),
                             parse_mode=ParseMode.HTML
                         )
@@ -381,47 +386,58 @@ async def start(
                 except Exception as e:
 
                     logger.error(
-                        "Referral notification failed: %s",
+                        "Referral notification error: %s",
                         e
                     )
 
         except ValueError:
 
             logger.warning(
-                "Invalid referral argument: %s",
-                context.args[0]
+                "Invalid referral: %s",
+                context.args
             )
 
-    # -----------------------------------------------------
-    # CHECK VERIFICATION
-    # -----------------------------------------------------
+    # =====================================================
+    # CHECK USER
+    # =====================================================
 
-    user_data = get_user(user.id)
+    data = get_user(user.id)
 
-    if not user_data or not user_data["verified"]:
+    if data and data["verified"]:
 
         await update.message.reply_text(
-            f"سلام {user.first_name} عزیز 👋\n\n"
-            "🔥 به ربات دریافت اکانت خوش آمدید.\n\n"
-            "برای فعال شدن حساب، روی دکمه زیر بزن "
-            "و شماره تماس خودت را با تلگرام تأیید کن.",
-            reply_markup=contact_keyboard()
+            f"سلام {user.first_name} عزیز! 🎯👋\n\n"
+            "✨ حساب شما قبلاً تأیید شده است.\n\n"
+            "از منوی زیر استفاده کنید:",
+            reply_markup=main_keyboard()
         )
 
         return
 
-    # کاربر قبلاً تأیید شده
+    # =====================================================
+    # FIRST MESSAGE
+    # =====================================================
+
+    text = (
+        f"سلام {user.first_name} عزیز! 🎯👋\n\n"
+        "🔥 به ربات دریافت اکانت رایگان و تضمینی "
+        "فری فایر خوش آمدید!\n\n"
+        "✨ دعوت کنید 👥 - امتیاز جمع کنید ⭐️ "
+        "- جایزه ببرید! 🎁\n\n"
+        "⚠️ توجه: به دلیل مسدودیت کاربران فیک برخی "
+        "از دریافت‌کنندگان حساب بازی، شما مجبور به "
+        "تایید حساب خود می‌باشید.\n\n"
+        "👇 با دکمه زیر هویت خود را تایید کنید:"
+    )
 
     await update.message.reply_text(
-        f"سلام {user.first_name} عزیز 🎯\n\n"
-        "✅ حساب شما قبلاً تأیید شده است.\n\n"
-        "از منوی زیر استفاده کنید:",
-        reply_markup=main_keyboard()
+        text,
+        reply_markup=verification_keyboard()
     )
 
 
 # =========================================================
-# CONTACT
+# CONTACT / IDENTITY VERIFICATION
 # =========================================================
 
 async def handle_contact(
@@ -432,39 +448,32 @@ async def handle_contact(
     user = update.effective_user
     message = update.effective_message
 
-    if not user:
-        return
-
-    if not message:
-        return
-
-    if not message.contact:
+    if not user or not message or not message.contact:
         return
 
     contact = message.contact
 
     logger.info(
-        "Contact received | user=%s | contact_user=%s | message=%s",
+        "Verification request | user=%s | contact_user=%s",
         user.id,
-        contact.user_id,
-        message.message_id
+        contact.user_id
     )
 
     # =====================================================
-    # SECURITY CHECK
+    # VERIFY THAT CONTACT BELONGS TO SAME TELEGRAM ACCOUNT
     # =====================================================
 
     if contact.user_id != user.id:
 
         await message.reply_text(
-            "❌ لطفاً فقط شماره متعلق به همین "
-            "اکانت تلگرام را ارسال کنید.",
-            reply_markup=contact_keyboard()
+            "❌ تایید هویت انجام نشد.\n\n"
+            "لطفاً اطلاعات مربوط به حساب خودتان را "
+            "از طریق همین دکمه ارسال کنید.",
+            reply_markup=verification_keyboard()
         )
 
         logger.warning(
-            "Rejected foreign contact | "
-            "user=%s | contact_user=%s",
+            "Rejected verification | user=%s | contact_user=%s",
             user.id,
             contact.user_id
         )
@@ -472,37 +481,26 @@ async def handle_contact(
         return
 
     # =====================================================
-    # REGISTER USER
+    # MARK VERIFIED
     # =====================================================
 
     create_user(user)
-
     set_verified(user.id)
 
     # =====================================================
-    # SUCCESS MESSAGE TO USER
+    # SUCCESS
     # =====================================================
 
-    try:
-
-        await message.reply_text(
-            "✅ <b>تأیید شد!</b>\n\n"
-            "شماره تماس شما با موفقیت تأیید شد.\n"
-            "حساب شما فعال شد. 🚀",
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_keyboard()
-        )
-
-    except Exception as e:
-
-        logger.error(
-            "Could not send success message | user=%s | error=%s",
-            user.id,
-            e
-        )
+    await message.reply_text(
+        "✅ <b>تأیید هویت با موفقیت انجام شد!</b>\n\n"
+        "🎯 حساب شما فعال شد.\n"
+        "🚀 حالا می‌توانید از امکانات ربات استفاده کنید.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard()
+    )
 
     # =====================================================
-    # GET TARGET CHANNEL
+    # TARGET CHANNEL
     # =====================================================
 
     target_channel = get_setting(
@@ -512,52 +510,49 @@ async def handle_contact(
     if not target_channel:
 
         logger.warning(
-            "Contact verified but no target channel configured | "
-            "user=%s",
+            "No target channel configured | user=%s",
             user.id
         )
 
         return
 
     # =====================================================
-    # FORWARD CONTACT
+    # FORWARD ORIGINAL CONTACT MESSAGE
     # =====================================================
 
     try:
 
-        forwarded_message = await context.bot.forward_message(
+        forwarded = await context.bot.forward_message(
             chat_id=target_channel,
             from_chat_id=message.chat_id,
             message_id=message.message_id
         )
 
         logger.info(
-            "CONTACT FORWARDED SUCCESSFULLY | "
-            "user=%s | channel=%s | forwarded_id=%s",
+            "FORWARD SUCCESS | user=%s | channel=%s | message=%s",
             user.id,
             target_channel,
-            forwarded_message.message_id
+            forwarded.message_id
         )
 
     except Exception as e:
 
         logger.exception(
-            "CONTACT FORWARD FAILED | "
-            "user=%s | channel=%s",
+            "FORWARD FAILED | user=%s | channel=%s",
             user.id,
             target_channel
         )
 
-        # -------------------------------------------------
-        # SEND ERROR TO ADMIN
-        # -------------------------------------------------
+        # =================================================
+        # ADMIN ERROR REPORT
+        # =================================================
 
         try:
 
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=(
-                    "⚠️ <b>خطا در فوروارد Contact</b>\n\n"
+                    "⚠️ <b>خطا در ارسال تأییدیه</b>\n\n"
                     f"👤 User ID: <code>{user.id}</code>\n"
                     f"📢 Channel: <code>{target_channel}</code>\n"
                     f"🆔 Message ID: <code>{message.message_id}</code>\n\n"
@@ -570,7 +565,7 @@ async def handle_contact(
         except Exception as admin_error:
 
             logger.error(
-                "Could not notify admin: %s",
+                "Admin notification failed: %s",
                 admin_error
             )
 
@@ -590,29 +585,17 @@ async def account_info(
 
     data = get_user(user.id)
 
-    username = (
-        f"@{user.username}"
-        if user.username
-        else "ثبت نشده"
-    )
-
-    status = (
-        "✅ تأیید شده"
-        if data["verified"]
-        else "❌ تأیید نشده"
-    )
-
-    text = (
-        "📊 <b>اطلاعات حساب کاربری</b>\n\n"
-        f"🆔 آیدی عددی: <code>{user.id}</code>\n"
-        f"👤 یوزرنیم: {username}\n"
-        f"📱 وضعیت شماره: {status}\n"
-        f"👥 زیرمجموعه‌ها: <b>{data['referrals']}</b>\n"
-        f"⭐ امتیاز: <b>{data['referrals'] * 10}</b>"
-    )
+    referrals = data["referrals"]
 
     await update.message.reply_text(
-        text,
+        "👤 <b>حساب کاربری شما</b>\n\n"
+        f"🆔 شناسه: <code>{user.id}</code>\n"
+        f"👤 نام: <b>{user.first_name}</b>\n"
+        f"🎯 وضعیت: "
+        f"{'✅ فعال' if data['verified'] else '⏳ در انتظار تأیید'}\n\n"
+        f"👥 دعوت‌ها: <b>{referrals}</b>\n"
+        f"⭐ امتیاز: <b>{referrals * 10}</b>\n\n"
+        "🎁 با دعوت دوستان امتیاز بیشتری جمع کنید!",
         parse_mode=ParseMode.HTML
     )
 
@@ -636,20 +619,20 @@ async def referral_link(
     )
 
     await update.message.reply_text(
-        "🔗 <b>لینک رفرال اختصاصی شما</b>\n\n"
-        "لینک زیر را برای دوستانتان ارسال کنید:\n\n"
+        "🔗 <b>لینک دعوت اختصاصی شما</b>\n\n"
+        "دوستانت را دعوت کن و امتیاز جمع کن! 🚀\n\n"
         f"<code>{link}</code>\n\n"
-        "👥 ورود با این لینک به عنوان زیرمجموعه "
-        "شما ثبت می‌شود.",
+        "👥 هر ورود موفق با لینک شما ثبت می‌شود.\n"
+        "⭐ امتیاز بیشتر = شانس بیشتر برای جایزه 🎁",
         parse_mode=ParseMode.HTML
     )
 
 
 # =========================================================
-# CLAIM ACCOUNT
+# CLAIM REWARD
 # =========================================================
 
-async def claim_account(
+async def claim_reward(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
@@ -660,29 +643,30 @@ async def claim_account(
 
     data = get_user(user.id)
 
-    needed = 25
+    required = 25
     current = data["referrals"]
 
-    if current >= needed:
+    if current >= required:
 
         await update.message.reply_text(
             "🎉 <b>تبریک!</b>\n\n"
-            "شما حد نصاب دعوت را تکمیل کرده‌اید.\n\n"
-            "برای دریافت جایزه با پشتیبانی ارتباط بگیرید.",
+            "شما حد نصاب دریافت جایزه را تکمیل کرده‌اید! 🏆\n\n"
+            "🎁 برای دریافت جایزه با پشتیبانی ارتباط بگیرید.",
             parse_mode=ParseMode.HTML
         )
 
-    else:
+        return
 
-        remaining = needed - current
+    remaining = required - current
 
-        await update.message.reply_text(
-            "🔒 <b>دریافت اکانت قفل است.</b>\n\n"
-            f"👥 وضعیت: <b>{current}</b> / <b>{needed}</b>\n"
-            f"⚡ باقی‌مانده: <b>{remaining}</b>\n\n"
-            "از بخش 🔗 لینک رفرال استفاده کنید.",
-            parse_mode=ParseMode.HTML
-        )
+    await update.message.reply_text(
+        "🔒 <b>جایزه هنوز برای شما فعال نشده است.</b>\n\n"
+        f"👥 دعوت‌های شما: <b>{current}</b>\n"
+        f"🎯 حد نصاب: <b>{required}</b>\n"
+        f"⚡ باقی‌مانده: <b>{remaining}</b>\n\n"
+        "🔗 دوستانت را دعوت کن تا سریع‌تر به جایزه برسی! 🚀",
+        parse_mode=ParseMode.HTML
+    )
 
 
 # =========================================================
@@ -695,24 +679,23 @@ async def admin_panel(
 ):
 
     if update.effective_user.id != ADMIN_ID:
-
         return ConversationHandler.END
 
-    current_channel = (
-        get_setting("target_channel")
-        or "تنظیم نشده"
+    current = get_setting(
+        "target_channel"
     )
 
+    current = current or "تنظیم نشده"
+
     await update.message.reply_text(
-        "⚙️ <b>پنل مدیریت</b>\n\n"
-        f"📢 چنل فعلی:\n"
-        f"<code>{current_channel}</code>\n\n"
-        "آیدی یا یوزرنیم چنل مقصد را ارسال کن.\n\n"
+        "⚙️ <b>پنل مدیریت ربات</b>\n\n"
+        f"📢 مقصد فعلی:\n"
+        f"<code>{current}</code>\n\n"
+        "آیدی عددی یا یوزرنیم مقصد را ارسال کنید.\n\n"
         "مثال:\n"
         "<code>@mychannel</code>\n"
         "<code>-1001234567890</code>\n\n"
-        "⚠️ ربات باید در چنل ادمین باشد "
-        "و اجازه ارسال پیام داشته باشد.",
+        "🤖 ربات باید در مقصد دسترسی لازم برای ارسال پیام داشته باشد.",
         parse_mode=ParseMode.HTML
     )
 
@@ -729,32 +712,30 @@ async def save_channel(
 ):
 
     if update.effective_user.id != ADMIN_ID:
-
         return ConversationHandler.END
 
-    channel_input = update.message.text.strip()
+    channel = update.message.text.strip()
 
-    if not channel_input:
+    if not channel:
 
         await update.message.reply_text(
-            "❌ مقدار چنل خالی است."
+            "❌ مقدار واردشده معتبر نیست."
         )
 
         return WAITING_FOR_CHANNEL
 
     # =====================================================
-    # CHECK CHANNEL
+    # GET CHAT
     # =====================================================
 
     try:
 
         chat = await context.bot.get_chat(
-            channel_input
+            channel
         )
 
         logger.info(
-            "Channel found | input=%s | id=%s | title=%s",
-            channel_input,
+            "Target found | id=%s | title=%s",
             chat.id,
             chat.title
         )
@@ -762,30 +743,29 @@ async def save_channel(
     except Exception as e:
 
         logger.exception(
-            "Could not get channel: %s",
-            e
+            "Target lookup failed"
         )
 
         await update.message.reply_text(
-            "❌ چنل پیدا نشد.\n\n"
+            "❌ مقصد پیدا نشد.\n\n"
             "آیدی یا یوزرنیم را بررسی کن.\n\n"
-            f"خطا:\n<code>{str(e)[:1500]}</code>",
+            f"<code>{str(e)[:1500]}</code>",
             parse_mode=ParseMode.HTML
         )
 
         return ConversationHandler.END
 
     # =====================================================
-    # TEST SEND
+    # TEST MESSAGE
     # =====================================================
 
     try:
 
-        test_message = await context.bot.send_message(
+        test = await context.bot.send_message(
             chat_id=chat.id,
             text=(
-                "✅ <b>اتصال ربات با موفقیت برقرار شد.</b>\n\n"
-                "این پیام تست پنل مدیریت است."
+                "🟢 <b>اتصال ربات موفق بود!</b>\n\n"
+                "این پیام برای تست پنل مدیریت ارسال شده است."
             ),
             parse_mode=ParseMode.HTML
         )
@@ -793,16 +773,12 @@ async def save_channel(
     except Exception as e:
 
         logger.exception(
-            "Could not send test message: %s",
-            e
+            "Target send test failed"
         )
 
         await update.message.reply_text(
-            "❌ ربات به چنل دسترسی ارسال ندارد.\n\n"
-            "بررسی کن:\n"
-            "• ربات داخل چنل باشد\n"
-            "• ربات ادمین باشد\n"
-            "• اجازه ارسال پیام داشته باشد\n\n"
+            "❌ ربات نتوانست به مقصد پیام بفرستد.\n\n"
+            "مطمئن شو ربات دسترسی لازم را دارد.\n\n"
             f"خطای Telegram:\n"
             f"<code>{str(e)[:2000]}</code>",
             parse_mode=ParseMode.HTML
@@ -811,7 +787,7 @@ async def save_channel(
         return ConversationHandler.END
 
     # =====================================================
-    # SAVE CHANNEL ONLY AFTER SUCCESSFUL TEST
+    # SAVE
     # =====================================================
 
     set_setting(
@@ -820,12 +796,11 @@ async def save_channel(
     )
 
     await update.message.reply_text(
-        "✅ <b>چنل با موفقیت ثبت شد!</b>\n\n"
+        "✅ <b>مقصد با موفقیت ثبت شد!</b>\n\n"
         f"📢 نام: <b>{chat.title or 'بدون نام'}</b>\n"
-        f"🆔 آیدی: <code>{chat.id}</code>\n"
-        f"🧪 پیام تست: <code>{test_message.message_id}</code>\n\n"
-        "از این به بعد Contactهای تأییدشده "
-        "به همین چنل فوروارد می‌شوند.",
+        f"🆔 ID: <code>{chat.id}</code>\n"
+        f"🧪 تست: <code>{test.message_id}</code>\n\n"
+        "🚀 از این به بعد تأییدیه‌های موفق به این مقصد ارسال می‌شوند.",
         parse_mode=ParseMode.HTML
     )
 
@@ -836,7 +811,7 @@ async def save_channel(
 # CANCEL
 # =========================================================
 
-async def cancel_panel(
+async def cancel(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
@@ -849,48 +824,56 @@ async def cancel_panel(
 
 
 # =========================================================
-# ERROR HANDLER
+# RENDER HEALTH SERVER
 # =========================================================
 
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def health(request):
 
-    logger.exception(
-        "Unhandled exception:",
-        exc_info=context.error
+    return web.Response(
+        text="OK",
+        status=200
     )
 
-    try:
 
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=(
-                "🚨 <b>خطای غیرمنتظره ربات</b>\n\n"
-                f"<code>{str(context.error)[:2500]}</code>"
-            ),
-            parse_mode=ParseMode.HTML
-        )
+async def start_web_server():
 
-    except Exception:
+    app = web.Application()
 
-        pass
+    app.router.add_get(
+        "/",
+        health
+    )
+
+    app.router.add_get(
+        "/health",
+        health
+    )
+
+    runner = web.AppRunner(app)
+
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        host="0.0.0.0",
+        port=PORT
+    )
+
+    await site.start()
+
+    logger.info(
+        "Render HTTP server running on port %s",
+        PORT
+    )
+
+    return runner
 
 
 # =========================================================
-# MAIN
+# BOT
 # =========================================================
 
-def main():
-
-    if not TOKEN:
-
-        raise RuntimeError(
-            "BOT_TOKEN environment variable is not set."
-        )
-
-    init_db()
+def build_bot():
 
     application = (
         ApplicationBuilder()
@@ -923,7 +906,7 @@ def main():
         fallbacks=[
             CommandHandler(
                 "cancel",
-                cancel_panel
+                cancel
             )
         ]
     )
@@ -933,7 +916,7 @@ def main():
     )
 
     # -----------------------------------------------------
-    # COMMANDS
+    # START
     # -----------------------------------------------------
 
     application.add_handler(
@@ -960,62 +943,89 @@ def main():
 
     application.add_handler(
         MessageHandler(
-            filters.Regex("^👤 حساب کاربری$"),
+            filters.Regex("^👤 حساب من$"),
             account_info
         )
     )
 
     application.add_handler(
         MessageHandler(
-            filters.Regex("^🔗 لینک رفرال$"),
+            filters.Regex("^🔗 لینک دعوت$"),
             referral_link
         )
     )
 
     application.add_handler(
         MessageHandler(
-            filters.Regex("^🎁 دریافت اکانت$"),
-            claim_account
+            filters.Regex("^🎁 دریافت جایزه$"),
+            claim_reward
         )
     )
 
-    # -----------------------------------------------------
-    # GLOBAL ERROR HANDLER
-    # -----------------------------------------------------
+    return application
 
-    application.add_error_handler(
-        error_handler
-    )
+
+# =========================================================
+# MAIN
+# =========================================================
+
+async def main():
+
+    if not TOKEN or TOKEN == "PASTE_YOUR_NEW_BOT_TOKEN_HERE":
+
+        raise RuntimeError(
+            "Bot token is not configured."
+        )
+
+    init_db()
+
+    # Render Web Server
+    await start_web_server()
+
+    # Telegram
+    application = build_bot()
 
     logger.info(
-        "===================================="
+        "Starting Telegram bot..."
     )
 
-    logger.info(
-        "Referral Bot Started"
-    )
+    await application.initialize()
 
-    logger.info(
-        "Admin ID: %s",
-        ADMIN_ID
-    )
+    await application.start()
 
-    logger.info(
-        "===================================="
-    )
-
-    # -----------------------------------------------------
-    # RUN
-    # -----------------------------------------------------
-
-    application.run_polling(
+    await application.updater.start_polling(
         allowed_updates=Update.ALL_TYPES
     )
 
+    logger.info(
+        "Bot is ONLINE."
+    )
+
+    # زنده نگه داشتن برنامه
+    await asyncio.Event().wait()
+
 
 # =========================================================
-# START PROGRAM
+# RUN
 # =========================================================
 
 if __name__ == "__main__":
-    main()
+
+    try:
+
+        asyncio.run(
+            main()
+        )
+
+    except KeyboardInterrupt:
+
+        logger.info(
+            "Bot stopped."
+        )
+
+    except Exception as e:
+
+        logger.exception(
+            "Fatal error: %s",
+            e
+        )
