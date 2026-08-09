@@ -1,6 +1,4 @@
-import os
 import logging
-from aiohttp import web
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
@@ -243,10 +241,6 @@ async def cancel_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("عملیات لغو شد.")
     return ConversationHandler.END
 
-# Dummy Web Server for Render Health Check
-async def handle_ping(request):
-    return web.Response(text="Bot is live!")
-
 # ----------------- MAIN FUNCTION -----------------
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
@@ -265,22 +259,6 @@ def main():
     app.add_handler(MessageHandler(filters.Regex("^👤 حساب کاربری$"), account_info))
     app.add_handler(MessageHandler(filters.Regex("^🔗 لینک رفرال$"), referral_link))
     app.add_handler(MessageHandler(filters.Regex("^🎁 دریافت اکانت$"), claim_account))
-
-    # راه‌اندازی همزمان وب‌سرور برای پاس کردن Health Check رندر
-    port = int(os.environ.get("PORT", 8080))
-    web_app = web.Application()
-    web_app.router.add_get("/", handle_ping)
-    
-    runner = web.AppRunner(web_app)
-    app.job_queue.run_once(lambda ctx: runner.setup(), when=0)
-    
-    async def start_webserver(app_instance):
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', port)
-        await site.start()
-
-    print(f"Starting web server on port {port}...")
-    app.post_init = start_webserver
 
     print("Bot is running...")
     app.run_polling()
