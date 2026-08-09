@@ -20,7 +20,7 @@ logging.basicConfig(
 )
 
 # ---------------- CONFIGS ----------------
-TOKEN = "8986373312:AAGW03MADCNnFcM2-RJYlhAwP2ynAiyiY2M"
+TOKEN = "8986373312:AAHt9YHgEu2M_jtbD_qUHQOJY25xAOHwaTU"
 ADMIN_ID = 6749949992
 
 # دیتابیس ساده در حافظه
