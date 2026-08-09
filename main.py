@@ -24,7 +24,7 @@ from telegram.ext import (
 # CONFIG
 # =========================================================
 
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = "8986373312:AAHt9YHgEu2M_jtbD_qUHQOJY25xAOHwaTU"
 
 # همان ADMIN_ID فایل قبلی
 ADMIN_ID = 6749949992
