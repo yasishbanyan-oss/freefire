@@ -10,6 +10,8 @@ from telegram import (
     Update,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
 from telegram.constants import ParseMode
 
@@ -20,6 +22,7 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     ConversationHandler,
+    CallbackQueryHandler,
     filters,
 )
 
@@ -29,7 +32,7 @@ from telegram.ext import (
 # =========================================================
 
 # توکن جدید رباتت را اینجا قرار بده
-TOKEN = "8986373312:AAHt9YHgEu2M_jtbD_qUHQOJY25xAOHwaTU"
+TOKEN = "8608671429:AAEgpspTVbx4tNLU2SpluVXwhx4gMyGNfjM"
 
 # مالک ربات
 ADMIN_ID = 6749949992
@@ -39,6 +42,10 @@ DB_FILE = "bot.db"
 
 # پورت Render
 PORT = int(os.getenv("PORT", "10000"))
+
+# کانال اجباری روبلاکس
+REQUIRED_CHANNEL = "@RobloxRetroOrg"
+REQUIRED_CHANNEL_URL = "https://t.me/RobloxRetroOrg"
 
 # وضعیت پنل
 WAITING_FOR_CHANNEL = 1
@@ -53,7 +60,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
-logger = logging.getLogger("FreeFireReferralBot")
+logger = logging.getLogger("RobloxReferralBot")
 
 
 # =========================================================
@@ -86,8 +93,11 @@ def init_db():
             invited_by INTEGER,
             referrals INTEGER DEFAULT 0,
             verified INTEGER DEFAULT 0,
+            blocked INTEGER DEFAULT 0,
+            block_reason TEXT,
             created_at TEXT NOT NULL,
-            verified_at TEXT
+            verified_at TEXT,
+            joined INTEGER DEFAULT 0
         )
     """)
 
@@ -99,6 +109,17 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+
+    # Backward-compatible columns for existing databases.
+    for column_sql in (
+        "ALTER TABLE users ADD COLUMN joined INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN block_reason TEXT",
+    ):
+        try:
+            cursor.execute(column_sql)
+        except sqlite3.OperationalError:
+            pass
 
     conn.commit()
     conn.close()
@@ -140,6 +161,49 @@ def set_setting(key, value):
 
     conn.commit()
     conn.close()
+
+
+def is_iranian_phone(phone: str) -> bool:
+    """
+    Accept Iranian mobile numbers in the common +98 / 0098 / 09 formats.
+    Only mobile numbers beginning with 9 after the country code are accepted.
+    """
+    if not phone:
+        return False
+
+    normalized = phone.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+
+    if normalized.startswith("+98"):
+        normalized = normalized[3:]
+    elif normalized.startswith("0098"):
+        normalized = normalized[4:]
+    elif normalized.startswith("98"):
+        normalized = normalized[2:]
+
+    if normalized.startswith("0"):
+        normalized = normalized[1:]
+
+    return len(normalized) == 10 and normalized.startswith("9") and normalized.isdigit()
+
+
+def block_user(user_id: int, reason: str):
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE users SET blocked = 1, block_reason = ? WHERE user_id = ?",
+        (reason, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_blocked(user_id: int) -> bool:
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT blocked FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return bool(row and row["blocked"])
 
 
 def create_user(user):
@@ -207,6 +271,15 @@ def get_user(user_id):
     conn.close()
 
     return row
+
+
+
+def set_joined(user_id):
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET joined = 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
 
 
 def set_verified(user_id):
@@ -302,13 +375,19 @@ def add_referral(user_id, referrer_id):
 # KEYBOARDS
 # =========================================================
 
-def verification_keyboard():
+def membership_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎮 ورود به کانال Roblox", url=REQUIRED_CHANNEL_URL)],
+        [InlineKeyboardButton("✅ عضو شدم — بررسی عضویت", callback_data="check_membership")],
+    ])
 
+
+def verification_keyboard():
     return ReplyKeyboardMarkup(
         [
             [
                 KeyboardButton(
-                    "🔐 تأیید هویت",
+                    "📱 تأیید شماره",
                     request_contact=True
                 )
             ]
@@ -319,11 +398,11 @@ def verification_keyboard():
 
 
 def main_keyboard():
-
     return ReplyKeyboardMarkup(
         [
-            ["👤 حساب من", "🔗 لینک دعوت"],
-            ["🎁 دریافت جایزه"],
+            ["👤 پروفایل من", "🔗 لینک دعوت"],
+            ["🎁 جوایز روبلاکس"],
+            ["📖 راهنما", "📊 وضعیت من"],
         ],
         resize_keyboard=True
     )
@@ -333,107 +412,130 @@ def main_keyboard():
 # START
 # =========================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def is_channel_member(bot, user_id: int) -> bool:
+    # عضویت کانال عمداً بررسی نمی‌شود؛ ربات دسترسی لازم برای get_chat_member ندارد.
+    return True
 
-    if not update.effective_user:
+
+async def send_join_required(update: Update):
+    await update.effective_message.reply_text(
+        "🎮 <b>قبل از شروع یک مرحله کوچیک مونده!</b>\n\n"
+        "برای استفاده از ربات، اول عضو کانال رسمی Roblox شو.\n\n"
+        "1️⃣ روی «ورود به کانال Roblox» بزن\n"
+        "2️⃣ عضو کانال شو\n"
+        "3️⃣ برگرد و «عضو شدم» رو بزن\n\n"
+        "بعد از تأیید عضویت، مستقیم وارد ربات می‌شی.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=membership_keyboard()
+    )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.message:
         return
 
     user = update.effective_user
-
     create_user(user)
 
-    # =====================================================
-    # REFERRAL
-    # =====================================================
+    if is_blocked(user.id):
+        await update.message.reply_text(
+            "🚫 <b>دسترسی شما مسدود است</b>\n\n"
+            "این حساب امکان استفاده از ربات را ندارد.",
+            parse_mode=ParseMode.HTML
+        )
+        return
 
+    data = get_user(user.id)
+
+    if not data or not data["joined"]:
+        await send_join_required(update)
+        return
+
+    # ثبت دعوت فقط بعد از عبور از عضویت اجباری
     if context.args:
-
         try:
-
             referrer_id = int(context.args[0])
-
-            added = add_referral(
-                user.id,
-                referrer_id
-            )
+            added = add_referral(user.id, referrer_id)
 
             if added:
-
                 try:
-
-                    referrer = get_user(
-                        referrer_id
-                    )
-
+                    referrer = get_user(referrer_id)
                     if referrer:
-
                         await context.bot.send_message(
                             chat_id=referrer_id,
                             text=(
-                                "🎉 <b>دعوت جدید!</b>\n\n"
-                                "یک نفر با لینک دعوت شما وارد شد.\n\n"
-                                f"👥 تعداد دعوت‌های شما: "
-                                f"<b>{referrer['referrals']}</b>\n"
-                                f"⭐ امتیاز شما: "
-                                f"<b>{referrer['referrals'] * 10}</b>"
+                                "🎉 <b>دعوت جدید ثبت شد</b>\n\n"
+                                "یک نفر با لینک دعوت شما وارد ربات شد.\n\n"
+                                f"👥 دعوت‌های موفق: <b>{referrer['referrals']}</b>\n"
+                                f"🪙 امتیاز: <b>{referrer['referrals'] * 10}</b>"
                             ),
                             parse_mode=ParseMode.HTML
                         )
-
                 except Exception as e:
-
-                    logger.error(
-                        "Referral notification error: %s",
-                        e
-                    )
-
+                    logger.error("Referral notification error: %s", e)
         except ValueError:
-
-            logger.warning(
-                "Invalid referral: %s",
-                context.args
-            )
-
-    # =====================================================
-    # CHECK USER
-    # =====================================================
+            logger.warning("Invalid referral: %s", context.args)
 
     data = get_user(user.id)
 
     if data and data["verified"]:
-
         await update.message.reply_text(
-            f"سلام {user.first_name} عزیز! 🎯👋\n\n"
-            "✨ حساب شما قبلاً تأیید شده است.\n\n"
-            "از منوی زیر استفاده کنید:",
+            f"سلام {user.first_name} 👋\n\n"
+            "🎮 <b>مرکز Roblox</b> آماده‌ست.\n"
+            "از منوی پایین می‌تونی پروفایل، دعوت‌ها و جوایزت رو ببینی.",
+            parse_mode=ParseMode.HTML,
             reply_markup=main_keyboard()
         )
-
         return
 
-    # =====================================================
-    # FIRST MESSAGE
-    # =====================================================
-
-    text = (
-        f"سلام {user.first_name} عزیز! 🎯👋\n\n"
-        "🔥 به ربات دریافت اکانت رایگان و تضمینی "
-        "فری فایر خوش آمدید!\n\n"
-        "✨ دعوت کنید 👥 - امتیاز جمع کنید ⭐️ "
-        "- جایزه ببرید! 🎁\n\n"
-        "⚠️ توجه: به دلیل مسدودیت کاربران فیک برخی "
-        "از دریافت‌کنندگان حساب بازی، شما مجبور به "
-        "تایید حساب خود می‌باشید.\n\n"
-        "👇 با دکمه زیر هویت خود را تایید کنید:"
-    )
-
     await update.message.reply_text(
-        text,
+        f"✅ عضویت شما تأیید شد! به ربات خوش آمدید.\n\n🔥 سلام {user.first_name} عزیز به ربات مجموعه ما خوش اومدی!\n\n- مجموعه ما در حال حاضر 4 سال بصورت مداوم درحال کار و فعالیت است و در نهایت با تلاش و کوشش توانستیم رباتی را جهت خدمت به ایرانیان عزیز فراهم کنیم.\n\n⚠️ توجه: به دلیل مسدودیت کاربران فیک برخی از دریافت‌کنندگان حساب بازی، شما مجبور به تایید حساب خود می‌باشید.",
         reply_markup=verification_keyboard()
     )
+    return
+
+    await update.message.reply_text(
+        f"سلام {user.first_name} 👋\n\n"
+        "🎮 <b>به مرکز Roblox خوش اومدی!</b>\n\n"
+        "برای فعال شدن حساب، فقط شماره متعلق به همین حساب تلگرام "
+        "رو از طریق دکمه زیر ارسال کن.\n\n"
+        "🇮🇷 توجه: فقط شماره‌های ایران پذیرفته می‌شن.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=verification_keyboard()
+    )
+
+
+
+async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دکمه بررسی عضویت را بدون دسترسی به کانال تأیید می‌کند."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    user_id = query.from_user.id
+    await query.answer("عضویت تأیید شد ✅")
+    create_user(query.from_user)
+    set_joined(user_id)
+
+    username = query.from_user.first_name or "کاربر"
+
+    try:
+        await query.edit_message_text(
+            f"✅ عضویت شما تأیید شد! به ربات خوش آمدید.\n\n"
+            f"🔥 سلام {username} عزیز به ربات مجموعه ما خوش اومدی!\n\n"
+            f"- مجموعه ما در حال حاضر 4 سال بصورت مداوم درحال کار و فعالیت است و در نهایت با تلاش و کوشش توانستیم رباتی را جهت خدمت به ایرانیان عزیز فراهم کنیم.\n\n"
+            f"⚠️ توجه: به دلیل مسدودیت کاربران فیک برخی از دریافت‌کنندگان حساب بازی، شما مجبور به تایید حساب خود می‌باشید."
+        )
+        await query.message.reply_text("👇 برای ادامه شماره خود را تایید کنید.", reply_markup=verification_keyboard())
+    except Exception:
+        try:
+            await query.message.reply_text(
+                "✅ <b>عضویت شما تأیید شد!</b>\n\n"
+                "🎮 حالا می‌توانید مرحله بعدی را انجام دهید.",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
 
 
 # =========================================================
@@ -452,6 +554,22 @@ async def handle_contact(
         return
 
     contact = message.contact
+
+    if is_blocked(user.id):
+        await message.reply_text(
+            "🚫 <b>دسترسی شما مسدود است.</b>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if not await is_channel_member(context.bot, user.id):
+        await message.reply_text(
+            "🔒 <b>ابتدا باید عضو کانال رسمی Roblox باشی.</b>\n\n"
+            "بعد از عضویت، دوباره از ربات استفاده کن.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=membership_keyboard()
+        )
+        return
 
     logger.info(
         "Verification request | user=%s | contact_user=%s",
@@ -481,6 +599,33 @@ async def handle_contact(
         return
 
     # =====================================================
+    # IRAN-ONLY PHONE VALIDATION
+    # =====================================================
+
+    phone = contact.phone_number or ""
+
+    if not is_iranian_phone(phone):
+        reason = "Non-Iranian phone number / verification bypass attempt"
+        block_user(user.id, reason)
+
+        await message.reply_text(
+            "🚫 <b>شماره شما ایرانی نیست!</b> 🇮🇷❌\n\n"
+            "⚠️ این ربات فقط برای شماره‌های ایران فعال است.\n\n"
+            "🛑 به دلیل تلاش برای دور زدن سیستم تأیید، "
+            "حساب شما از مجموعه مسدود شد.\n\n"
+            "🔒 دسترسی شما به ربات قطع شده است.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=None
+        )
+
+        logger.warning(
+            "Blocked non-Iranian verification | user=%s | phone_prefix=%s",
+            user.id,
+            phone[:6]
+        )
+        return
+
+    # =====================================================
     # MARK VERIFIED
     # =====================================================
 
@@ -492,10 +637,7 @@ async def handle_contact(
     # =====================================================
 
     await message.reply_text(
-        "✅ <b>تأیید هویت با موفقیت انجام شد!</b>\n\n"
-        "🎯 حساب شما فعال شد.\n"
-        "🚀 حالا می‌توانید از امکانات ربات استفاده کنید.",
-        parse_mode=ParseMode.HTML,
+        "✅ حساب شما تایید شد و منوی اصلی فعال گردید.",
         reply_markup=main_keyboard()
     )
 
@@ -517,16 +659,19 @@ async def handle_contact(
         return
 
     # =====================================================
-    # FORWARD ORIGINAL CONTACT MESSAGE
+    # COPY ORIGINAL CONTACT MESSAGE
     # =====================================================
+    # copy_message keeps the contact as a contact message and
+    # avoids the broken send_message/forward_message mix-up.
 
     try:
-
-        forwarded = await context.bot.forward_message(
+        copied = await context.bot.copy_message(
             chat_id=target_channel,
             from_chat_id=message.chat_id,
             message_id=message.message_id
         )
+
+        forwarded = copied
 
         logger.info(
             "FORWARD SUCCESS | user=%s | channel=%s | message=%s",
@@ -580,22 +725,43 @@ async def account_info(
 ):
 
     user = update.effective_user
+    if not user:
+        return
+
+    if is_blocked(user.id):
+        await update.message.reply_text(
+            "🚫 <b>دسترسی شما مسدود است.</b>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if not await is_channel_member(context.bot, user.id):
+        await send_join_required(update)
+        return
 
     create_user(user)
+
+    if is_blocked(user.id):
+        await update.message.reply_text(
+            "🚫 <b>دسترسی مسدود است</b>\n\n"
+            "⛔️ این حساب امکان استفاده از ربات را ندارد.",
+            parse_mode=ParseMode.HTML
+        )
+        return
 
     data = get_user(user.id)
 
     referrals = data["referrals"]
 
     await update.message.reply_text(
-        "👤 <b>حساب کاربری شما</b>\n\n"
+        "🟥🎮 <b>پروفایل روبلاکس شما</b>\n\n"
         f"🆔 شناسه: <code>{user.id}</code>\n"
-        f"👤 نام: <b>{user.first_name}</b>\n"
-        f"🎯 وضعیت: "
-        f"{'✅ فعال' if data['verified'] else '⏳ در انتظار تأیید'}\n\n"
-        f"👥 دعوت‌ها: <b>{referrals}</b>\n"
-        f"⭐ امتیاز: <b>{referrals * 10}</b>\n\n"
-        "🎁 با دعوت دوستان امتیاز بیشتری جمع کنید!",
+        f"🎮 بازیکن: <b>{user.first_name}</b>\n"
+        f"📌 وضعیت: "
+        f"{'🟢 فعال' if data['verified'] else '🟡 در انتظار تأیید'}\n\n"
+        f"👥 دعوت‌های موفق: <b>{referrals}</b>\n"
+        f"🪙 امتیاز: <b>{referrals * 10}</b>\n\n"
+        "🎁 دوستانت را دعوت کن تا امتیاز بیشتری برای جوایز روبلاکس بگیری!",
         parse_mode=ParseMode.HTML
     )
 
@@ -610,6 +776,19 @@ async def referral_link(
 ):
 
     user = update.effective_user
+    if not user:
+        return
+
+    if is_blocked(user.id):
+        await update.message.reply_text(
+            "🚫 <b>دسترسی شما مسدود است.</b>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if not await is_channel_member(context.bot, user.id):
+        await send_join_required(update)
+        return
 
     bot = await context.bot.get_me()
 
@@ -619,11 +798,12 @@ async def referral_link(
     )
 
     await update.message.reply_text(
-        "🔗 <b>لینک دعوت اختصاصی شما</b>\n\n"
-        "دوستانت را دعوت کن و امتیاز جمع کن! 🚀\n\n"
+        "🔗 <b>لینک دعوت شما</b>\n\n"
+        "لینکت رو برای دوستات بفرست و امتیاز جمع کن.\n\n"
         f"<code>{link}</code>\n\n"
-        "👥 هر ورود موفق با لینک شما ثبت می‌شود.\n"
-        "⭐ امتیاز بیشتر = شانس بیشتر برای جایزه 🎁",
+        "👥 هر ورود موفق با لینک شما ثبت می‌شه.\n"
+        "🪙 هر دعوت = ۱۰ امتیاز\n"
+        "🎁 امتیازت بیشتر باشه، شانس جایزه هم بیشتره.",
         parse_mode=ParseMode.HTML
     )
 
@@ -638,8 +818,29 @@ async def claim_reward(
 ):
 
     user = update.effective_user
+    if not user:
+        return
+
+    if is_blocked(user.id):
+        await update.message.reply_text(
+            "🚫 <b>دسترسی شما مسدود است.</b>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if not await is_channel_member(context.bot, user.id):
+        await send_join_required(update)
+        return
 
     create_user(user)
+
+    if is_blocked(user.id):
+        await update.message.reply_text(
+            "🚫 <b>دسترسی مسدود است</b>\n\n"
+            "⛔️ این حساب امکان استفاده از ربات را ندارد.",
+            parse_mode=ParseMode.HTML
+        )
+        return
 
     data = get_user(user.id)
 
@@ -650,8 +851,8 @@ async def claim_reward(
 
         await update.message.reply_text(
             "🎉 <b>تبریک!</b>\n\n"
-            "شما حد نصاب دریافت جایزه را تکمیل کرده‌اید! 🏆\n\n"
-            "🎁 برای دریافت جایزه با پشتیبانی ارتباط بگیرید.",
+            "شما حد نصاب جایزه روبلاکس را تکمیل کرده‌اید! 🏆\n\n"
+            "🎁 برای دریافت جایزه با پشتیبانی ارتباط بگیر.",
             parse_mode=ParseMode.HTML
         )
 
@@ -660,12 +861,65 @@ async def claim_reward(
     remaining = required - current
 
     await update.message.reply_text(
-        "🔒 <b>جایزه هنوز برای شما فعال نشده است.</b>\n\n"
+        "🔒 <b>جایزه روبلاکس هنوز فعال نشده است.</b>\n\n"
         f"👥 دعوت‌های شما: <b>{current}</b>\n"
-        f"🎯 حد نصاب: <b>{required}</b>\n"
-        f"⚡ باقی‌مانده: <b>{remaining}</b>\n\n"
-        "🔗 دوستانت را دعوت کن تا سریع‌تر به جایزه برسی! 🚀",
+        f"🎯 حد نصاب جایزه: <b>{required}</b>\n"
+        f"⚡ دعوت باقی‌مانده: <b>{remaining}</b>\n\n"
+        "🔗 دوستانت را دعوت کن تا سریع‌تر به جایزه روبلاکس برسی! 🎮",
         parse_mode=ParseMode.HTML
+    )
+
+
+# =========================================================
+# ROBLOX MENU
+# =========================================================
+
+async def bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+
+    if is_blocked(user.id):
+        await update.message.reply_text(
+            "🚫 <b>دسترسی شما مسدود است.</b>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if not await is_channel_member(context.bot, user.id):
+        await send_join_required(update)
+        return
+    if not user:
+        return
+    data = get_user(user.id)
+    if not data:
+        create_user(user)
+        data = get_user(user.id)
+
+    status = "🟩 فعال" if data["verified"] else "🟨 در انتظار تأیید"
+    await update.message.reply_text(
+        "📊 <b>وضعیت حساب</b>\n\n"
+        f"👤 بازیکن: <b>{user.first_name}</b>\n"
+        f"🔐 وضعیت: <b>{status}</b>\n"
+        f"👥 دعوت‌ها: <b>{data['referrals']}</b>\n"
+        f"🪙 امتیاز: <b>{data['referrals'] * 10}</b>\n\n"
+        "🎮 برای شروع فعالیت، از منوی اصلی استفاده کن.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard()
+    )
+
+
+async def roblox_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📖 <b>راهنمای Roblox</b>\n\n"
+        "🟥 <b>پروفایل من</b> — اطلاعات و امتیاز شما\n"
+        "🟩 <b>لینک دعوت</b> — لینک اختصاصی دعوت\n"
+        "🟦 <b>جوایز روبلاکس</b> — بررسی شرایط دریافت جایزه\n"
+        "⬛️ <b>وضعیت من</b> — وضعیت تأیید حساب\n\n"
+        "🔐 برای ورود اولیه، فقط شماره متعلق به همان حساب تلگرام را "
+        "با دکمه تأیید ارسال کن.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard()
     )
 
 
@@ -765,7 +1019,7 @@ async def save_channel(
             chat_id=chat.id,
             text=(
                 "🟢 <b>اتصال ربات موفق بود!</b>\n\n"
-                "این پیام برای تست پنل مدیریت ارسال شده است."
+                "این پیام برای تست اتصال مرکز روبلاکس ارسال شده است."
             ),
             parse_mode=ParseMode.HTML
         )
@@ -881,6 +1135,11 @@ def build_bot():
         .build()
     )
 
+    # دکمه «عضو شدم» عضویت واقعی کاربر در کانال را بررسی می‌کند.
+    application.add_handler(
+        CallbackQueryHandler(check_membership, pattern=r"^(check_membership|joined|verify_membership)$")
+    )
+
     # -----------------------------------------------------
     # ADMIN PANEL
     # -----------------------------------------------------
@@ -916,6 +1175,10 @@ def build_bot():
     )
 
     # -----------------------------------------------------
+    # MEMBERSHIP CHECK
+    # -----------------------------------------------------
+
+    # -----------------------------------------------------
     # START
     # -----------------------------------------------------
 
@@ -943,7 +1206,7 @@ def build_bot():
 
     application.add_handler(
         MessageHandler(
-            filters.Regex("^👤 حساب من$"),
+            filters.Regex("^👤 پروفایل من$"),
             account_info
         )
     )
@@ -957,8 +1220,22 @@ def build_bot():
 
     application.add_handler(
         MessageHandler(
-            filters.Regex("^🎁 دریافت جایزه$"),
+            filters.Regex("^🎁 جوایز روبلاکس$"),
             claim_reward
+        )
+    )
+
+    application.add_handler(
+        MessageHandler(
+            filters.Regex("^📊 وضعیت من$"),
+            bot_status
+        )
+    )
+
+    application.add_handler(
+        MessageHandler(
+            filters.Regex("^📖 راهنما$"),
+            roblox_help
         )
     )
 
